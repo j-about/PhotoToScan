@@ -18,22 +18,65 @@ pip install phototoscan
 
 ### As a library
 
+#### Examples
+
 ```python
-from phototoscan import Scanner
+from phototoscan import Scanner, OutputFormat
 scanner = Scanner()
-scanner.scan(<IMAGE_PATH>, output_dir=<OUTPUT_DIR>)
+
+# Basic usage with file path
+result = scanner.scan(
+    image_input="path/to/image.jpg",
+    output_format=OutputFormat.PATH_STR,
+    output_dir="path/to/output"  # optional
+)
+
+# Advanced usage with various input and output types
+# 1. From file path to file path string
+path_str = scanner.scan(
+    image_input="path/to/image.jpg",
+    output_format=OutputFormat.PATH_STR
+)
+
+# 2. From file path to Path object
+path_obj = scanner.scan(
+    image_input="path/to/image.jpg",
+    output_format=OutputFormat.FILE_PATH
+)
+
+# 3. From numpy array to bytes
+bytes_data = scanner.scan(
+    image_input=numpy_array,
+    output_format=OutputFormat.BYTES,
+    ext=".jpg"  # required when input is numpy array and output is bytes
+)
+
+# 4. From bytes to numpy array
+np_array = scanner.scan(
+    image_input=image_bytes,
+    output_format=OutputFormat.NP_ARRAY
+)
 ```
 
-- output_dir is optional.
-- If not specified, a folder named output will be automatically created at the same level as the input image.
-- If the specified output directory does not exist, it will be created automatically.
+#### Parameters:
+
+- `image_input`: Can be a file path (str/Path), bytes/bytearray, or numpy array
+- `output_format`: Determines the return type (OutputFormat.PATH_STR, OutputFormat.FILE_PATH, OutputFormat.BYTES, or OutputFormat.NP_ARRAY)
+- `output_dir`: Optional. Directory to save the output (required for file outputs when input is numpy array)
+- `output_filename`: Optional. Name for the output file (required for file outputs when input isn't a file path)
+- `ext`: Optional. File extension for output (required for bytes output when input is numpy array)
+
+#### Notes:
+
+- When providing a file path as input and not specifying an output directory, a folder named "output" will be created at the same level as the input image.
+- Any specified output directory that doesn't exist will be created automatically.
 
 ### As a command-line tool
 
 #### To scan a single image:
 
 ```bash
-uvx phototoscan --image <IMAGE_PATH> --output-dir <OUTPUT_DIR>
+uvx phototoscan --image <IMG_PATH> --output-dir <OUTPUT_DIR>
 ```
 
 - --output-dir is optional.
@@ -45,7 +88,7 @@ uvx phototoscan --image <IMAGE_PATH> --output-dir <OUTPUT_DIR>
 #### Scan all images in a directory
 
 ```bash
-uvx phototoscan --images <IMAGES_DIR> --output-dir <OUTPUT_DIR>
+uvx phototoscan --images <IMG_DIR> --output-dir <OUTPUT_DIR>
 ```
 
 - The same rules apply for --output-dir as above.

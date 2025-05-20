@@ -1,7 +1,7 @@
 # import the necessary packages
-from scipy.spatial import distance as dist
-import numpy as np
 import cv2
+import numpy as np
+from scipy.spatial import distance as dist
 
 def order_points(pts):
     # sort the points based on their x-coordinates

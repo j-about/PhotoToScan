@@ -1,7 +1,7 @@
 import argparse
-import os
+from pathlib import Path
 
-from phototoscan.scanner import Scanner
+from phototoscan.scanner import Scanner, OutputFormat
 
 def main():
     parser = argparse.ArgumentParser()
@@ -19,17 +19,26 @@ def main():
 
     valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".tiff", ".tif"]
 
-    get_ext = lambda f: os.path.splitext(f)[1].lower()
+    get_ext = lambda f: Path(f).suffix.lower()
 
     # Scan single image specified by command line argument --image <IMAGE_PATH>
     if im_file_path:
-        scanner.scan(im_file_path, output_dir=output_dir)
-
+        f = Path(im_file_path)
+        scanner.scan(f, output_format=OutputFormat.FILE_PATH, output_filename=f.name, output_dir=output_dir)
     # Scan all valid images in directory specified by command line argument --images <IMAGE_DIR>
     else:
-        im_files = [f for f in os.listdir(im_dir) if get_ext(f) in valid_formats]
-        for im in im_files:
-            scanner.scan(im_dir + '/' + im, output_dir=output_dir)
+        im_dir = Path(im_dir)
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+        for f in im_dir.iterdir():
+            if f.is_file() and get_ext(f) in valid_formats:
+                scanner.scan(
+                    f,
+                    output_format=OutputFormat.FILE_PATH,
+                    output_filename=f.name,
+                    output_dir=output_dir
+                )
+                print("Processed " + f.name)
 
 if __name__ == "__main__":
     main()

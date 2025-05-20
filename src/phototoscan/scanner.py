@@ -1,21 +1,31 @@
 # USAGE:
-# python scan.py (--images <IMG_DIR> | --image <IMG_PATH>)
+# uvx phototoscan (--images <IMG_DIR> | --image <IMG_PATH>)
 # To scan all images in a directory automatically:
-# python scan.py --images sample_images
+# uvx phototoscan --images <IMG_DIR>
 
 # Scanned images will be output to directory named 'output'
+from enum import Enum, auto
+import itertools
+import math
+import mimetypes
+from pathlib import Path
+from typing import Union
+
+import cv2
+import numpy as np
+import puremagic
+from pylsd.lsd import lsd
+from scipy.spatial import distance as dist
 
 from phototoscan.pyimagesearch import transform
 from phototoscan.pyimagesearch import imutils
-from scipy.spatial import distance as dist
-import numpy as np
-import itertools
-import math
-import cv2
-from pylsd.lsd import lsd
 
-import argparse
-import os
+class OutputFormat(Enum):
+    """Enum for output formats"""
+    PATH_STR = auto()
+    FILE_PATH = auto()
+    BYTES = auto()
+    NP_ARRAY = auto()
 
 class Scanner(object):
     """An image scanner"""
@@ -233,15 +243,47 @@ class Scanner(object):
             
         return screenCnt.reshape(4, 2)
 
-    def scan(self, image_path, output_dir=None):
-
+    def scan(
+        self,
+        image_input: Union[str, Path, bytes, bytearray, np.ndarray],
+        output_format: OutputFormat,
+        output_dir: Union[str, Path, None] = None,
+        output_filename: Union[str, None] = None,
+        ext: Union[str, None] = None
+    ) -> Union[str, Path, bytes, np.ndarray]:
         RESCALED_HEIGHT = 500.0
 
         # load the image and compute the ratio of the old height
         # to the new height, clone it, and resize it
-        image = cv2.imread(image_path)
+        basename = None
+        mime = None
 
-        assert(image is not None)
+        if isinstance(image_input, (str, Path)) and Path(image_input).exists():
+            image_path = str(image_input)
+            image = cv2.imread(image_path)
+            assert(image is not None)
+            basename = output_filename or Path(image_path).name
+            mime = puremagic.from_file(image_path, mime=True)
+        elif isinstance(image_input, (bytes, bytearray)):
+            raw = bytes(image_input)
+            arr = np.frombuffer(image_input, np.uint8)
+            image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            mime = puremagic.from_string(raw, mime=True)
+        elif isinstance(image_input, np.ndarray):
+            image = image_input
+
+        if mime is not None:
+            ext = mimetypes.guess_extension(mime)
+
+        if isinstance(image_input, (str, bytes, bytearray, np.ndarray)) and basename is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            assert output_filename is not None, f"output_filename must be provided for {output_format} output type"
+            basename = output_filename
+
+        if isinstance(image_input, np.ndarray) and ext is None and output_format is OutputFormat.BYTES:
+            assert ext is not None, f"ext must be provided for {output_format} output type when image_input is a numpy array"
+
+        if isinstance(image_input, np.ndarray) and output_dir is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when image_input is a numpy array"
 
         ratio = image.shape[0] / RESCALED_HEIGHT
         orig = image.copy()
@@ -264,9 +306,14 @@ class Scanner(object):
         thresh = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
 
         # save the transformed image
-        basename = os.path.basename(image_path)
-        if output_dir is None:
-            output_dir = os.path.join(os.path.dirname(image_path), "output")
-        os.makedirs(output_dir, exist_ok=True)
-        cv2.imwrite(os.path.join(output_dir, basename), thresh)
-        print("Proccessed " + basename)
+        if output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            output_dir = Path(image_input).parent / "output" if output_dir is None else Path(output_dir)
+            output_filepath = output_dir / basename
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(output_filepath), thresh)
+            return output_filepath if output_format is OutputFormat.FILE_PATH else str(output_filepath)
+        elif output_format is OutputFormat.BYTES:
+            _, buffer = cv2.imencode(ext, thresh)
+            return buffer.tobytes()
+        elif output_format is OutputFormat.NP_ARRAY:
+            return thresh
