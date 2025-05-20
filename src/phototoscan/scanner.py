@@ -1,19 +1,14 @@
 # USAGE:
-# python scan.py (--images <IMG_DIR> | --image <IMG_PATH>) [-i]
-# For example, to scan a single image with interactive mode:
-# python scan.py --image sample_images/desk.JPG -i
+# python scan.py (--images <IMG_DIR> | --image <IMG_PATH>)
 # To scan all images in a directory automatically:
 # python scan.py --images sample_images
 
 # Scanned images will be output to directory named 'output'
 
-from pyimagesearch import transform
-from pyimagesearch import imutils
+from phototoscan.pyimagesearch import transform
+from phototoscan.pyimagesearch import imutils
 from scipy.spatial import distance as dist
-from matplotlib.patches import Polygon
-import polygon_interacter as poly_i
 import numpy as np
-import matplotlib.pyplot as plt
 import itertools
 import math
 import cv2
@@ -22,21 +17,18 @@ from pylsd.lsd import lsd
 import argparse
 import os
 
-class DocScanner(object):
+class Scanner(object):
     """An image scanner"""
 
-    def __init__(self, interactive=False, MIN_QUAD_AREA_RATIO=0.25, MAX_QUAD_ANGLE_RANGE=40):
+    def __init__(self, MIN_QUAD_AREA_RATIO=0.25, MAX_QUAD_ANGLE_RANGE=40):
         """
         Args:
-            interactive (boolean): If True, user can adjust screen contour before
-                transformation occurs in interactive pyplot window.
             MIN_QUAD_AREA_RATIO (float): A contour will be rejected if its corners 
                 do not form a quadrilateral that covers at least MIN_QUAD_AREA_RATIO 
                 of the original image. Defaults to 0.25.
             MAX_QUAD_ANGLE_RANGE (int):  A contour will also be rejected if the range 
                 of its interior angles exceeds MAX_QUAD_ANGLE_RANGE. Defaults to 40.
-        """        
-        self.interactive = interactive
+        """
         self.MIN_QUAD_AREA_RATIO = MIN_QUAD_AREA_RATIO
         self.MAX_QUAD_ANGLE_RANGE = MAX_QUAD_ANGLE_RANGE        
 
@@ -215,14 +207,6 @@ class DocScanner(object):
             if self.is_valid_contour(approx, IM_WIDTH, IM_HEIGHT):
                 approx_contours.append(approx)
 
-            # for debugging: uncomment the code below to draw the corners and countour found 
-            # by get_corners() and overlay it on the image
-
-            # cv2.drawContours(rescaled_image, [approx], -1, (20, 20, 255), 2)
-            # plt.scatter(*zip(*test_corners))
-            # plt.imshow(rescaled_image)
-            # plt.show()
-
         # also attempt to find contours directly from the edged image, which occasionally 
         # produces better results
         (cnts, hierarchy) = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -249,24 +233,9 @@ class DocScanner(object):
             
         return screenCnt.reshape(4, 2)
 
-    def interactive_get_contour(self, screenCnt, rescaled_image):
-        poly = Polygon(screenCnt, animated=True, fill=False, color="yellow", linewidth=5)
-        fig, ax = plt.subplots()
-        ax.add_patch(poly)
-        ax.set_title(('Drag the corners of the box to the corners of the document. \n'
-            'Close the window when finished.'))
-        p = poly_i.PolygonInteractor(ax, poly)
-        plt.imshow(rescaled_image)
-        plt.show()
-
-        new_points = p.get_poly_points()[:4]
-        new_points = np.array([[p] for p in new_points], dtype = "int32")
-        return new_points.reshape(4, 2)
-
-    def scan(self, image_path):
+    def scan(self, image_path, output_dir=None):
 
         RESCALED_HEIGHT = 500.0
-        OUTPUT_DIR = 'output'
 
         # load the image and compute the ratio of the old height
         # to the new height, clone it, and resize it
@@ -280,9 +249,6 @@ class DocScanner(object):
 
         # get the contour of the document
         screenCnt = self.get_contour(rescaled_image)
-
-        if self.interactive:
-            screenCnt = self.interactive_get_contour(screenCnt, rescaled_image)
 
         # apply the perspective transformation
         warped = transform.four_point_transform(orig, screenCnt * ratio)
@@ -299,35 +265,8 @@ class DocScanner(object):
 
         # save the transformed image
         basename = os.path.basename(image_path)
-        cv2.imwrite(OUTPUT_DIR + '/' + basename, thresh)
+        if output_dir is None:
+            output_dir = os.path.join(os.path.dirname(image_path), "output")
+        os.makedirs(output_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(output_dir, basename), thresh)
         print("Proccessed " + basename)
-
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    group = ap.add_mutually_exclusive_group(required=True)
-    group.add_argument("--images", help="Directory of images to be scanned")
-    group.add_argument("--image", help="Path to single image to be scanned")
-    ap.add_argument("-i", action='store_true',
-        help = "Flag for manually verifying and/or setting document corners")
-
-    args = vars(ap.parse_args())
-    im_dir = args["images"]
-    im_file_path = args["image"]
-    interactive_mode = args["i"]
-
-    scanner = DocScanner(interactive_mode)
-
-    valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".tiff", ".tif"]
-
-    get_ext = lambda f: os.path.splitext(f)[1].lower()
-
-    # Scan single image specified by command line argument --image <IMAGE_PATH>
-    if im_file_path:
-        scanner.scan(im_file_path)
-
-    # Scan all valid images in directory specified by command line argument --images <IMAGE_DIR>
-    else:
-        im_files = [f for f in os.listdir(im_dir) if get_ext(f) in valid_formats]
-        for im in im_files:
-            scanner.scan(im_dir + '/' + im)

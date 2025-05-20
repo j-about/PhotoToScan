@@ -1,38 +1,51 @@
-# Document Scanner
+# PhotoToScan
 
-### An interactive document scanner built in Python using OpenCV
+A Python library that converts casual document snapshots into professional-quality scanned documents.
 
-The scanner takes a poorly scanned image, finds the corners of the document, applies the perspective transformation to get a top-down view of the document, sharpens the image, and applies an adaptive color threshold to clean up the image.
+This project makes use of the [OpenCV-Document-Scanner](https://github.com/andrewdcampbell/OpenCV-Document-Scanner) from [@andrewdcampbell](https://github.com/andrewdcampbell) and [@joaofauvel](https://github.com/joaofauvel), and the transform and imutils modules from [@PyImageSearch](https://github.com/PyImageSearch) (which can be accessed [here](http://www.pyimagesearch.com/2014/09/01/build-kick-ass-mobile-document-scanner-just-5-minutes/)).
 
-On my test dataset of 280 images, the program correctly detected the corners of the document 92.8% of the time.
+## Environment
 
-This project makes use of the transform and imutils modules from pyimagesearch (which can be accessed [here](http://www.pyimagesearch.com/2014/09/01/build-kick-ass-mobile-document-scanner-just-5-minutes/)). The UI code for the interactive mode is adapted from `poly_editor.py` from [here](https://matplotlib.org/examples/event_handling/poly_editor.html).
+### [uv](https://github.com/astral-sh/uv) - An extremely fast Python package and project manager, written in Rust.
 
-* You can manually click and drag the corners of the document to be perspective transformed:
-![Example of interactive GUI](https://github.com/andrewdcampbell/doc_scanner/blob/master/ui.gif)
+## Installation
 
-* The scanner can also process an entire directory of images automatically and save the output in an output directory:
-![Image Directory of images to be processed](https://github.com/andrewdcampbell/doc_scanner/blob/master/before_after.gif)
-
-#### Here are some examples of images before and after scan:
-<img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/sample_images/cell_pic.jpg" height="450"> <img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/output/cell_pic.jpg" height="450">
-
-<img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/sample_images/receipt.jpg" height="450"> <img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/output/receipt.jpg" height="450">
-
-<img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/sample_images/math_cheat_sheet.JPG" height="450"> <img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/output/math_cheat_sheet.JPG" height="450">
-
-<img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/sample_images/dollar_bill.JPG" width="350"> <img src="https://github.com/andrewdcampbell/doc_scanner/blob/master/output/dollar_bill.JPG" width="350">
-
-
-### Usage
 ```
-python scan.py (--images <IMG_DIR> | --image <IMG_PATH>) [-i]
+pip install phototoscan
 ```
-* The `-i` flag enables interactive mode, where you will be prompted to click and drag the corners of the document. For example, to scan a single image with interactive mode enabled:
+
+## How To Use It
+
+### As a library
+
+```python
+from phototoscan import Scanner
+scanner = Scanner()
+scanner.scan(<IMAGE_PATH>, output_dir=<OUTPUT_DIR>)
 ```
-python scan.py --image sample_images/desk.JPG -i
+
+- output_dir is optional.
+- If not specified, a folder named output will be automatically created at the same level as the input image.
+- If the specified output directory does not exist, it will be created automatically.
+
+### As a command-line tool
+
+#### To scan a single image:
+
+```bash
+uvx phototoscan --image <IMAGE_PATH> --output-dir <OUTPUT_DIR>
 ```
-* Alternatively, to scan all images in a directory without any input:
+
+- --output-dir is optional.
+
+- If not provided, a directory named output will be created next to the image file.
+
+- If the specified directory does not exist, it will be created automatically.
+
+#### Scan all images in a directory
+
+```bash
+uvx phototoscan --images <IMAGES_DIR> --output-dir <OUTPUT_DIR>
 ```
-python scan.py --images sample_images
-```
+
+- The same rules apply for --output-dir as above.
