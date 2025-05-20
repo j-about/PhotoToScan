@@ -21,21 +21,23 @@ pip install phototoscan
 #### Examples
 
 ```python
-from phototoscan import Scanner, OutputFormat
+from phototoscan import Scanner, OutputFormat, ScanningMode
 scanner = Scanner()
 
 # Basic usage with file path
 result = scanner.scan(
     image_input="path/to/image.jpg",
     output_format=OutputFormat.PATH_STR,
-    output_dir="path/to/output"  # optional
+    output_dir="path/to/output",  # optional
+    scanning_mode=ScanningMode.GRAYSCALE  # optional, defaults to GRAYSCALE
 )
 
 # Advanced usage with various input and output types
 # 1. From file path to file path string
 path_str = scanner.scan(
     image_input="path/to/image.jpg",
-    output_format=OutputFormat.PATH_STR
+    output_format=OutputFormat.PATH_STR,
+    scanning_mode=ScanningMode.COLOR  # Use color mode instead of default grayscale
 )
 
 # 2. From file path to Path object
@@ -62,6 +64,7 @@ np_array = scanner.scan(
 
 - `image_input`: Can be a file path (str/Path), bytes/bytearray, or numpy array
 - `output_format`: Determines the return type (OutputFormat.PATH_STR, OutputFormat.FILE_PATH, OutputFormat.BYTES, or OutputFormat.NP_ARRAY)
+- `scanning_mode`: Optional. Determines the output style (ScanningMode.COLOR or ScanningMode.GRAYSCALE). Defaults to GRAYSCALE
 - `output_dir`: Optional. Directory to save the output (required for file outputs when input is numpy array)
 - `output_filename`: Optional. Name for the output file (required for file outputs when input isn't a file path)
 - `ext`: Optional. File extension for output (required for bytes output when input is numpy array)
@@ -76,19 +79,20 @@ np_array = scanner.scan(
 #### To scan a single image:
 
 ```bash
-uvx phototoscan --image <IMG_PATH> --output-dir <OUTPUT_DIR>
+uvx phototoscan --image <IMG_PATH> --output-dir <OUTPUT_DIR> --scanning-mode <MODE>
 ```
 
-- --output-dir is optional.
+- `--output-dir` is optional.
 
-- If not provided, a directory named output will be created next to the image file.
+  - If not provided, a directory named output will be created next to the image file.
+  - If the specified directory does not exist, it will be created automatically.
 
-- If the specified directory does not exist, it will be created automatically.
+- `--scanning-mode` is optional. Can be either `color` or `grayscale` (default is `grayscale`).
 
 #### Scan all images in a directory
 
 ```bash
-uvx phototoscan --images <IMG_DIR> --output-dir <OUTPUT_DIR>
+uvx phototoscan --images <IMG_DIR> --output-dir <OUTPUT_DIR> --scanning-mode <MODE>
 ```
 
-- The same rules apply for --output-dir as above.
+- The same rules apply for `--output-dir` and `--scanning-mode` as above.

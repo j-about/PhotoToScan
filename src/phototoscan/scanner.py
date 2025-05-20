@@ -27,6 +27,11 @@ class OutputFormat(Enum):
     BYTES = auto()
     NP_ARRAY = auto()
 
+class ScanningMode(Enum):
+    """Enum for scanning modes"""
+    COLOR = auto()
+    GRAYSCALE = auto()
+
 class Scanner(object):
     """An image scanner"""
 
@@ -247,43 +252,58 @@ class Scanner(object):
         self,
         image_input: Union[str, Path, bytes, bytearray, np.ndarray],
         output_format: OutputFormat,
+        scanning_mode: ScanningMode = ScanningMode.GRAYSCALE,
         output_dir: Union[str, Path, None] = None,
-        output_filename: Union[str, None] = None,
+        output_filename: Union[str, Path, None] = None,
         ext: Union[str, None] = None
     ) -> Union[str, Path, bytes, np.ndarray]:
-        RESCALED_HEIGHT = 500.0
-
-        # load the image and compute the ratio of the old height
-        # to the new height, clone it, and resize it
-        basename = None
         mime = None
 
+        if output_filename is not None:
+            if isinstance(output_filename, str):
+                output_filename = Path(output_filename)
+            assert output_filename.stem != "" and output_filename.suffix != "", "output_filename must be a valid filename"
+            assert ext is None, "ext must be None if output_filename is provided"
+            ext = output_filename.suffix
+
+        if ext is not None:
+            ext = ext.lower()
+            ext = f".{ext}" if not ext.startswith('.') else ext
+            mime, _ = mimetypes.guess_type(f"dummy{ext}")
+            assert mime is not None, f"Invalid ext {ext} provided"
+            assert mime.startswith('image/'), f"Invalid mime type {mime} for extension {ext}"
+            if isinstance(image_input, np.ndarray) and output_format is OutputFormat.BYTES:
+                assert ext is not None, f"ext must be provided for {output_format} output type when image_input is a numpy array"
+
+        if isinstance(image_input, (bytes, bytearray, np.ndarray)) and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when image_input is {type(image_input)}"
+
         if isinstance(image_input, (str, Path)) and Path(image_input).exists():
-            image_path = str(image_input)
-            image = cv2.imread(image_path)
-            assert(image is not None)
-            basename = output_filename or Path(image_path).name
-            mime = puremagic.from_file(image_path, mime=True)
+            image_path_str = str(image_input) if isinstance(image_input, Path) else image_input
+            image = cv2.imread(image_path_str)
+            assert image is not None, f"Failed to read image from {image_path_str}"
+            if output_filename is None:
+                output_filename = Path(image_input) if isinstance(image_input, str) else image_input
+            if ext is None:
+                mime = puremagic.from_file(output_filename, mime=True)
         elif isinstance(image_input, (bytes, bytearray)):
-            raw = bytes(image_input)
+            raw = bytes(image_input) if isinstance(image_input, bytearray) else image_input
             arr = np.frombuffer(image_input, np.uint8)
             image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            mime = puremagic.from_string(raw, mime=True)
+            if ext is None:
+                mime = puremagic.from_string(raw, mime=True)
         elif isinstance(image_input, np.ndarray):
             image = image_input
 
-        if mime is not None:
+        if mime is not None and ext is None:
             ext = mimetypes.guess_extension(mime)
 
-        if isinstance(image_input, (str, bytes, bytearray, np.ndarray)) and basename is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+        if isinstance(image_input, (bytes, bytearray, np.ndarray)) and output_filename is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
             assert output_filename is not None, f"output_filename must be provided for {output_format} output type"
-            basename = output_filename
 
-        if isinstance(image_input, np.ndarray) and ext is None and output_format is OutputFormat.BYTES:
-            assert ext is not None, f"ext must be provided for {output_format} output type when image_input is a numpy array"
-
-        if isinstance(image_input, np.ndarray) and output_dir is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when image_input is a numpy array"
+        # load the image and compute the ratio of the old height
+        # to the new height, clone it, and resize it
+        RESCALED_HEIGHT = 500.0
 
         ratio = image.shape[0] / RESCALED_HEIGHT
         orig = image.copy()
@@ -295,25 +315,39 @@ class Scanner(object):
         # apply the perspective transformation
         warped = transform.four_point_transform(orig, screenCnt * ratio)
 
-        # convert the warped image to grayscale
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        if scanning_mode is ScanningMode.COLOR:
+            # split channels
+            b, g, r = cv2.split(warped)
+            sharpened_channels = []
 
-        # sharpen image
-        sharpen = cv2.GaussianBlur(gray, (0,0), 3)
-        sharpen = cv2.addWeighted(gray, 1.5, sharpen, -0.5, 0)
+            # sharpen each channel
+            for ch in (b, g, r):
+                blur = cv2.GaussianBlur(ch, (0, 0), 3)
+                sharpen = cv2.addWeighted(ch, 1.5, blur, -0.5, 0)
+                sharpened_channels.append(sharpen)
 
-        # apply adaptive threshold to get black and white effect
-        thresh = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
+            # remerge channels
+            processed = cv2.merge(sharpened_channels)
+        elif scanning_mode is ScanningMode.GRAYSCALE:
+            # convert the warped image to grayscale
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+            # sharpen image
+            sharpen = cv2.GaussianBlur(gray, (0,0), 3)
+            sharpen = cv2.addWeighted(gray, 1.5, sharpen, -0.5, 0)
+
+            # apply adaptive threshold to get black and white effect
+            processed = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
 
         # save the transformed image
         if output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            output_dir = Path(image_input).parent / "output" if output_dir is None else Path(output_dir)
-            output_filepath = output_dir / basename
+            output_dir = Path(output_dir) if output_dir is not None else Path(image_input).parent / "output"
+            output_filepath = output_dir / output_filename.name
             output_dir.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(output_filepath), thresh)
+            cv2.imwrite(str(output_filepath), processed)
             return output_filepath if output_format is OutputFormat.FILE_PATH else str(output_filepath)
         elif output_format is OutputFormat.BYTES:
-            _, buffer = cv2.imencode(ext, thresh)
+            _, buffer = cv2.imencode(ext, processed)
             return buffer.tobytes()
         elif output_format is OutputFormat.NP_ARRAY:
-            return thresh
+            return processed
