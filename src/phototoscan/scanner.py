@@ -27,8 +27,8 @@ class OutputFormat(Enum):
     BYTES = auto()
     NP_ARRAY = auto()
 
-class ScanningMode(Enum):
-    """Enum for scanning modes"""
+class ScanMode(Enum):
+    """Enum for scan modes"""
     COLOR = auto()
     GRAYSCALE = auto()
 
@@ -250,56 +250,66 @@ class Scanner(object):
 
     def scan(
         self,
-        image_input: Union[str, Path, bytes, bytearray, np.ndarray],
+        img_input: Union[str, Path, bytes, bytearray, np.ndarray],
         output_format: OutputFormat,
-        scanning_mode: ScanningMode = ScanningMode.GRAYSCALE,
+        scan_mode: ScanMode = ScanMode.GRAYSCALE,
         output_dir: Union[str, Path, None] = None,
         output_filename: Union[str, Path, None] = None,
         ext: Union[str, None] = None
     ) -> Union[str, Path, bytes, np.ndarray]:
         mime = None
 
+        if isinstance(img_input, (str, Path)):
+            assert Path(img_input).exists(), f"File {img_input} does not exist"
+
+        if isinstance(img_input, (bytes, bytearray, np.ndarray)) and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when img_input is {type(img_input)}"
+            assert output_filename is not None, f"output_filename must be provided for {output_format} output type when img_input is {type(img_input)}"
+
+        if isinstance(img_input, np.ndarray) and output_format is OutputFormat.BYTES:
+            assert ext is not None, f"ext must be provided for {output_format} output type when img_input is {type(img_input)}"
+
+        if output_format in (OutputFormat.BYTES, OutputFormat.NP_ARRAY):
+            assert output_dir is None, "output_dir must be None if output_format is BYTES or NP_ARRAY"
+
+        output_filename_provided = False
+
         if output_filename is not None:
+            assert ext is None, "ext must be None if output_filename is provided"
+            output_filename_provided = True
             if isinstance(output_filename, str):
                 output_filename = Path(output_filename)
             assert output_filename.stem != "" and output_filename.suffix != "", "output_filename must be a valid filename"
-            assert ext is None, "ext must be None if output_filename is provided"
             ext = output_filename.suffix
+        elif isinstance(img_input, (str, Path)):
+            output_filename = Path(img_input) if isinstance(img_input, str) else img_input
+            if ext is None:
+                mime = puremagic.from_file(output_filename, mime=True)
 
-        if ext is not None:
+        if isinstance(img_input, (bytes, bytearray)):
+            raw = bytes(img_input) if isinstance(img_input, bytearray) else img_input
+            if ext is None:
+                mime = puremagic.from_string(raw, mime=True)
+
+        if ext is not None and mime is None:
             ext = ext.lower()
             ext = f".{ext}" if not ext.startswith('.') else ext
             mime, _ = mimetypes.guess_type(f"dummy{ext}")
-            assert mime is not None, f"Invalid ext {ext} provided"
-            assert mime.startswith('image/'), f"Invalid mime type {mime} for extension {ext}"
-            if isinstance(image_input, np.ndarray) and output_format is OutputFormat.BYTES:
-                assert ext is not None, f"ext must be provided for {output_format} output type when image_input is a numpy array"
+            assert mime is not None, f"Invalid ext {ext} in output_filename provided" if output_filename_provided else "Invalid ext {ext} provided"
+        
+        if mime is not None:
+            assert mime.startswith('image/'), f"Invalid mime type {mime} for ext {ext} in output_filename provided" if output_filename_provided else f"Invalid mime type {mime} for ext {ext} provided"
+            if ext is None:
+                ext = mimetypes.guess_extension(mime)
 
-        if isinstance(image_input, (bytes, bytearray, np.ndarray)) and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when image_input is {type(image_input)}"
-
-        if isinstance(image_input, (str, Path)) and Path(image_input).exists():
-            image_path_str = str(image_input) if isinstance(image_input, Path) else image_input
+        if isinstance(img_input, (str, Path)):
+            image_path_str = str(img_input) if isinstance(img_input, Path) else img_input
             image = cv2.imread(image_path_str)
-            assert image is not None, f"Failed to read image from {image_path_str}"
-            if output_filename is None:
-                output_filename = Path(image_input) if isinstance(image_input, str) else image_input
-            if ext is None:
-                mime = puremagic.from_file(output_filename, mime=True)
-        elif isinstance(image_input, (bytes, bytearray)):
-            raw = bytes(image_input) if isinstance(image_input, bytearray) else image_input
-            arr = np.frombuffer(image_input, np.uint8)
+        elif isinstance(img_input, (bytes, bytearray)):
+            arr = np.frombuffer(img_input, np.uint8)
             image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if ext is None:
-                mime = puremagic.from_string(raw, mime=True)
-        elif isinstance(image_input, np.ndarray):
-            image = image_input
-
-        if mime is not None and ext is None:
-            ext = mimetypes.guess_extension(mime)
-
-        if isinstance(image_input, (bytes, bytearray, np.ndarray)) and output_filename is None and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            assert output_filename is not None, f"output_filename must be provided for {output_format} output type"
+        elif isinstance(img_input, np.ndarray):
+            image = img_input
 
         # load the image and compute the ratio of the old height
         # to the new height, clone it, and resize it
@@ -315,7 +325,7 @@ class Scanner(object):
         # apply the perspective transformation
         warped = transform.four_point_transform(orig, screenCnt * ratio)
 
-        if scanning_mode is ScanningMode.COLOR:
+        if scan_mode is ScanMode.COLOR:
             # split channels
             b, g, r = cv2.split(warped)
             sharpened_channels = []
@@ -328,7 +338,7 @@ class Scanner(object):
 
             # remerge channels
             processed = cv2.merge(sharpened_channels)
-        elif scanning_mode is ScanningMode.GRAYSCALE:
+        elif scan_mode is ScanMode.GRAYSCALE:
             # convert the warped image to grayscale
             gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
@@ -341,7 +351,7 @@ class Scanner(object):
 
         # save the transformed image
         if output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            output_dir = Path(output_dir) if output_dir is not None else Path(image_input).parent / "output"
+            output_dir = Path(output_dir) if output_dir is not None else Path(img_input).parent / "output"
             output_filepath = output_dir / output_filename.name
             output_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(output_filepath), processed)
