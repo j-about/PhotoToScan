@@ -1,12 +1,12 @@
-# USAGE:
-# uvx phototoscan (--images <IMG_DIR> | --image <IMG_PATH>)
-# To scan all images in a directory automatically:
-# uvx phototoscan --images <IMG_DIR>
+"""
+Document scanning module for converting casual photos into professional scans.
 
-# Scanned images will be output to directory named 'output'
+This module provides functionality to detect document boundaries in photos,
+apply perspective transformation to get a "top-down" view, and enhance
+the image quality to produce professional-quality scanned documents.
+"""
+
 from enum import Enum, auto
-import itertools
-import math
 import mimetypes
 from pathlib import Path
 from typing import Union
@@ -14,350 +14,427 @@ from typing import Union
 import cv2
 import numpy as np
 import puremagic
-from pylsd.lsd import lsd
-from scipy.spatial import distance as dist
 
 from phototoscan.pyimagesearch import transform
-from phototoscan.pyimagesearch import imutils
+from phototoscan.document_scanner.scan import get_contour
+
 
 class OutputFormat(Enum):
-    """Enum for output formats"""
+    """
+    Enumeration of supported output formats for processed images.
+
+    Attributes
+    ----------
+    PATH_STR : auto
+        Return the path to the saved image as a string.
+    FILE_PATH : auto
+        Return the path to the saved image as a Path object.
+    BYTES : auto
+        Return the image data as bytes.
+    NP_ARRAY : auto
+        Return the image data as a NumPy array.
+    """
+
     PATH_STR = auto()
     FILE_PATH = auto()
     BYTES = auto()
     NP_ARRAY = auto()
 
-class ScanMode(Enum):
-    """Enum for scan modes"""
+
+class Mode(Enum):
+    """
+    Enumeration of supported image color modes.
+
+    Attributes
+    ----------
+    COLOR : auto
+        Process the image in color (BGR) mode.
+    GRAYSCALE : auto
+        Process the image in grayscale mode.
+    """
+
     COLOR = auto()
     GRAYSCALE = auto()
 
-class Scanner(object):
-    """An image scanner"""
 
-    def __init__(self, MIN_QUAD_AREA_RATIO=0.25, MAX_QUAD_ANGLE_RANGE=40):
-        """
-        Args:
-            MIN_QUAD_AREA_RATIO (float): A contour will be rejected if its corners 
-                do not form a quadrilateral that covers at least MIN_QUAD_AREA_RATIO 
-                of the original image. Defaults to 0.25.
-            MAX_QUAD_ANGLE_RANGE (int):  A contour will also be rejected if the range 
-                of its interior angles exceeds MAX_QUAD_ANGLE_RANGE. Defaults to 40.
-        """
-        self.MIN_QUAD_AREA_RATIO = MIN_QUAD_AREA_RATIO
-        self.MAX_QUAD_ANGLE_RANGE = MAX_QUAD_ANGLE_RANGE        
+class Photo(object):
+    """
+    A class for converting casual document photos into professional scans.
 
-    def filter_corners(self, corners, min_dist=20):
-        """Filters corners that are within min_dist of others"""
-        def predicate(representatives, corner):
-            return all(dist.euclidean(representative, corner) >= min_dist
-                       for representative in representatives)
+    This class provides a set of professional document scanning tools that can be used
+    independently or together:
+    - Loading document photos from various sources (file path, bytes, numpy array)
+    - Detecting document boundaries in the photo
+    - Applying perspective correction to create a top-down view
+    - Converting between color modes (color or grayscale)
+    - Enhancing document quality and readability through sharpening and thresholding
+    - Saving results in various formats
 
-        filtered_corners = []
-        for c in corners:
-            if predicate(filtered_corners, c):
-                filtered_corners.append(c)
-        return filtered_corners
+    Each processing method can be called individually to perform specific operations
+    on the document image. For convenience, the `scan()` method orchestrates the
+    complete document scanning workflow by executing all steps in sequence.
+    """
 
-    def angle_between_vectors_degrees(self, u, v):
-        """Returns the angle between two vectors in degrees"""
-        return np.degrees(
-            math.acos(np.dot(u, v) / (np.linalg.norm(u) * np.linalg.norm(v))))
+    # Input parameters
+    img_input: Union[str, Path, bytes, bytearray, np.ndarray]  # Source image
+    output_format: OutputFormat  # Format for returning the processed image
+    mode: Mode = Mode.COLOR  # Color mode for processing
+    output_dir: Union[str, Path, None] = (
+        None  # Directory to save output (if applicable)
+    )
+    output_filename: Union[str, Path, None] = (
+        None  # Filename for saving output (if applicable)
+    )
+    ext: Union[str, None] = None  # File extension for the output
+    mime: Union[str, None] = None  # MIME type of the image
 
-    def get_angle(self, p1, p2, p3):
-        """
-        Returns the angle between the line segment from p2 to p1 
-        and the line segment from p2 to p3 in degrees
-        """
-        a = np.radians(np.array(p1))
-        b = np.radians(np.array(p2))
-        c = np.radians(np.array(p3))
+    # Internal state
+    image: Union[np.ndarray, None] = None  # Loaded/processed image data
+    corners: Union[np.ndarray, None] = None  # Detected document corners
 
-        avec = a - b
-        cvec = c - b
-
-        return self.angle_between_vectors_degrees(avec, cvec)
-
-    def angle_range(self, quad):
-        """
-        Returns the range between max and min interior angles of quadrilateral.
-        The input quadrilateral must be a numpy array with vertices ordered clockwise
-        starting with the top left vertex.
-        """
-        tl, tr, br, bl = quad
-        ura = self.get_angle(tl[0], tr[0], br[0])
-        ula = self.get_angle(bl[0], tl[0], tr[0])
-        lra = self.get_angle(tr[0], br[0], bl[0])
-        lla = self.get_angle(br[0], bl[0], tl[0])
-
-        angles = [ura, ula, lra, lla]
-        return np.ptp(angles)          
-
-    def get_corners(self, img):
-        """
-        Returns a list of corners ((x, y) tuples) found in the input image. With proper
-        pre-processing and filtering, it should output at most 10 potential corners.
-        This is a utility function used by get_contours. The input image is expected 
-        to be rescaled and Canny filtered prior to be passed in.
-        """
-        lines = lsd(img)
-
-        # massages the output from LSD
-        # LSD operates on edges. One "line" has 2 edges, and so we need to combine the edges back into lines
-        # 1. separate out the lines into horizontal and vertical lines.
-        # 2. Draw the horizontal lines back onto a canvas, but slightly thicker and longer.
-        # 3. Run connected-components on the new canvas
-        # 4. Get the bounding box for each component, and the bounding box is final line.
-        # 5. The ends of each line is a corner
-        # 6. Repeat for vertical lines
-        # 7. Draw all the final lines onto another canvas. Where the lines overlap are also corners
-
-        corners = []
-        if lines is not None:
-            # separate out the horizontal and vertical lines, and draw them back onto separate canvases
-            lines = lines.squeeze().astype(np.int32).tolist()
-            horizontal_lines_canvas = np.zeros(img.shape, dtype=np.uint8)
-            vertical_lines_canvas = np.zeros(img.shape, dtype=np.uint8)
-            for line in lines:
-                x1, y1, x2, y2, _ = line
-                if abs(x2 - x1) > abs(y2 - y1):
-                    (x1, y1), (x2, y2) = sorted(((x1, y1), (x2, y2)), key=lambda pt: pt[0])
-                    cv2.line(horizontal_lines_canvas, (max(x1 - 5, 0), y1), (min(x2 + 5, img.shape[1] - 1), y2), 255, 2)
-                else:
-                    (x1, y1), (x2, y2) = sorted(((x1, y1), (x2, y2)), key=lambda pt: pt[1])
-                    cv2.line(vertical_lines_canvas, (x1, max(y1 - 5, 0)), (x2, min(y2 + 5, img.shape[0] - 1)), 255, 2)
-
-            lines = []
-
-            # find the horizontal lines (connected-components -> bounding boxes -> final lines)
-            (contours, hierarchy) = cv2.findContours(horizontal_lines_canvas, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            contours = sorted(contours, key=lambda c: cv2.arcLength(c, True), reverse=True)[:2]
-            horizontal_lines_canvas = np.zeros(img.shape, dtype=np.uint8)
-            for contour in contours:
-                contour = contour.reshape((contour.shape[0], contour.shape[2]))
-                min_x = np.amin(contour[:, 0], axis=0) + 2
-                max_x = np.amax(contour[:, 0], axis=0) - 2
-                left_y = int(np.average(contour[contour[:, 0] == min_x][:, 1]))
-                right_y = int(np.average(contour[contour[:, 0] == max_x][:, 1]))
-                lines.append((min_x, left_y, max_x, right_y))
-                cv2.line(horizontal_lines_canvas, (min_x, left_y), (max_x, right_y), 1, 1)
-                corners.append((min_x, left_y))
-                corners.append((max_x, right_y))
-
-            # find the vertical lines (connected-components -> bounding boxes -> final lines)
-            (contours, hierarchy) = cv2.findContours(vertical_lines_canvas, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            contours = sorted(contours, key=lambda c: cv2.arcLength(c, True), reverse=True)[:2]
-            vertical_lines_canvas = np.zeros(img.shape, dtype=np.uint8)
-            for contour in contours:
-                contour = contour.reshape((contour.shape[0], contour.shape[2]))
-                min_y = np.amin(contour[:, 1], axis=0) + 2
-                max_y = np.amax(contour[:, 1], axis=0) - 2
-                top_x = int(np.average(contour[contour[:, 1] == min_y][:, 0]))
-                bottom_x = int(np.average(contour[contour[:, 1] == max_y][:, 0]))
-                lines.append((top_x, min_y, bottom_x, max_y))
-                cv2.line(vertical_lines_canvas, (top_x, min_y), (bottom_x, max_y), 1, 1)
-                corners.append((top_x, min_y))
-                corners.append((bottom_x, max_y))
-
-            # find the corners
-            corners_y, corners_x = np.where(horizontal_lines_canvas + vertical_lines_canvas == 2)
-            corners += zip(corners_x, corners_y)
-
-        # remove corners in close proximity
-        corners = self.filter_corners(corners)
-        return corners
-
-    def is_valid_contour(self, cnt, IM_WIDTH, IM_HEIGHT):
-        """Returns True if the contour satisfies all requirements set at instantitation"""
-
-        return (len(cnt) == 4 and cv2.contourArea(cnt) > IM_WIDTH * IM_HEIGHT * self.MIN_QUAD_AREA_RATIO 
-            and self.angle_range(cnt) < self.MAX_QUAD_ANGLE_RANGE)
-
-
-    def get_contour(self, rescaled_image):
-        """
-        Returns a numpy array of shape (4, 2) containing the vertices of the four corners
-        of the document in the image. It considers the corners returned from get_corners()
-        and uses heuristics to choose the four corners that most likely represent
-        the corners of the document. If no corners were found, or the four corners represent
-        a quadrilateral that is too small or convex, it returns the original four corners.
-        """
-
-        # these constants are carefully chosen
-        MORPH = 9
-        CANNY = 84
-        HOUGH = 25
-
-        IM_HEIGHT, IM_WIDTH, _ = rescaled_image.shape
-
-        # convert the image to grayscale and blur it slightly
-        gray = cv2.cvtColor(rescaled_image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (7,7), 0)
-
-        # dilate helps to remove potential holes between edge segments
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(MORPH,MORPH))
-        dilated = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-
-        # find edges and mark them in the output map using the Canny algorithm
-        edged = cv2.Canny(dilated, 0, CANNY)
-        test_corners = self.get_corners(edged)
-
-        approx_contours = []
-
-        if len(test_corners) >= 4:
-            quads = []
-
-            for quad in itertools.combinations(test_corners, 4):
-                points = np.array(quad)
-                points = transform.order_points(points)
-                points = np.array([[p] for p in points], dtype = "int32")
-                quads.append(points)
-
-            # get top five quadrilaterals by area
-            quads = sorted(quads, key=cv2.contourArea, reverse=True)[:5]
-            # sort candidate quadrilaterals by their angle range, which helps remove outliers
-            quads = sorted(quads, key=self.angle_range)
-
-            approx = quads[0]
-            if self.is_valid_contour(approx, IM_WIDTH, IM_HEIGHT):
-                approx_contours.append(approx)
-
-        # also attempt to find contours directly from the edged image, which occasionally 
-        # produces better results
-        (cnts, hierarchy) = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
-
-        # loop over the contours
-        for c in cnts:
-            # approximate the contour
-            approx = cv2.approxPolyDP(c, 80, True)
-            if self.is_valid_contour(approx, IM_WIDTH, IM_HEIGHT):
-                approx_contours.append(approx)
-                break
-
-        # If we did not find any valid contours, just use the whole image
-        if not approx_contours:
-            TOP_RIGHT = (IM_WIDTH, 0)
-            BOTTOM_RIGHT = (IM_WIDTH, IM_HEIGHT)
-            BOTTOM_LEFT = (0, IM_HEIGHT)
-            TOP_LEFT = (0, 0)
-            screenCnt = np.array([[TOP_RIGHT], [BOTTOM_RIGHT], [BOTTOM_LEFT], [TOP_LEFT]])
-
-        else:
-            screenCnt = max(approx_contours, key=cv2.contourArea)
-            
-        return screenCnt.reshape(4, 2)
-
-    def scan(
+    def __init__(
         self,
         img_input: Union[str, Path, bytes, bytearray, np.ndarray],
         output_format: OutputFormat,
-        scan_mode: ScanMode = ScanMode.GRAYSCALE,
+        mode: Mode = Mode.COLOR,
         output_dir: Union[str, Path, None] = None,
         output_filename: Union[str, Path, None] = None,
-        ext: Union[str, None] = None
-    ) -> Union[str, Path, bytes, np.ndarray]:
-        mime = None
+        ext: Union[str, None] = None,
+    ):
+        """
+        Initialize a document scanning processor with specified parameters.
 
-        if isinstance(img_input, (str, Path)):
-            assert Path(img_input).exists(), f"File {img_input} does not exist"
+        Parameters
+        ----------
+        img_input : Union[str, Path, bytes, bytearray, np.ndarray]
+            The source image to process. Can be:
+            - A path string to an image file
+            - A Path object pointing to an image file
+            - Bytes or bytearray containing image data
+            - A NumPy array containing image data
+        output_format : OutputFormat
+            The format in which to return the processed image
+        mode : Mode, optional
+            The color mode for processing, by default Mode.COLOR
+        output_dir : Union[str, Path, None], optional
+            Directory to save output (required for PATH_STR and FILE_PATH output formats
+            when img_input is bytes or ndarray), by default None
+        output_filename : Union[str, Path, None], optional
+            Filename for saving output (required for PATH_STR and FILE_PATH output formats
+            when img_input is bytes or ndarray), by default None
+        ext : Union[str, None], optional
+            File extension for output (required for BYTES output format when
+            img_input is ndarray), by default None
 
-        if isinstance(img_input, (bytes, bytearray, np.ndarray)) and output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            assert output_dir is not None, f"output_dir must be provided for {output_format} output type when img_input is {type(img_input)}"
-            assert output_filename is not None, f"output_filename must be provided for {output_format} output type when img_input is {type(img_input)}"
+        Notes
+        -----
+        The document detection process uses the following parameters internally:
+        - MIN_QUAD_AREA_RATIO (0.25): A contour will be rejected if its corners
+          do not form a quadrilateral that covers at least 25% of the original image.
+        - MAX_QUAD_ANGLE_RANGE (40): A contour will be rejected if the range
+          of its interior angles exceeds 40 degrees.
+        """
+        self.img_input = img_input
+        self.output_format = output_format
+        self.mode = mode
+        self.output_dir = output_dir
+        self.output_filename = output_filename
+        self.ext = ext
+        self.post_init()
 
-        if isinstance(img_input, np.ndarray) and output_format is OutputFormat.BYTES:
-            assert ext is not None, f"ext must be provided for {output_format} output type when img_input is {type(img_input)}"
+    def post_init(self):
+        """
+        Validate inputs and initialize additional parameters after __init__.
 
-        if output_format in (OutputFormat.BYTES, OutputFormat.NP_ARRAY):
-            assert output_dir is None, "output_dir must be None if output_format is BYTES or NP_ARRAY"
+        This method performs the following validations and initializations:
+        1. Validates file existence for path inputs
+        2. Ensures required parameters are provided based on input/output types
+        3. Handles file extension and MIME type detection
+        4. Normalizes file extensions
+
+        Raises
+        ------
+        AssertionError
+            If any validation check fails with a descriptive error message
+        """
+        # Validate that file exists if input is a path
+        if isinstance(self.img_input, (str, Path)):
+            assert Path(self.img_input).exists(), (
+                f"File {self.img_input} does not exist"
+            )
+
+        # For binary/array inputs with file output, require output path information
+        if isinstance(
+            self.img_input, (bytes, bytearray, np.ndarray)
+        ) and self.output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            assert self.output_dir is not None, (
+                f"output_dir must be provided for {self.output_format} output format when img_input is {type(self.img_input).__name__}"
+            )
+            assert self.output_filename is not None, (
+                f"output_filename must be provided for {self.output_format} output format when img_input is {type(self.img_input).__name__}"
+            )
+
+        # For numpy array with bytes output, require extension
+        if (
+            isinstance(self.img_input, np.ndarray)
+            and self.output_format is OutputFormat.BYTES
+        ):
+            assert self.ext is not None, (
+                f"ext must be provided for {self.output_format} output format when img_input is {type(self.img_input).__name__}"
+            )
+
+        # For memory-only outputs, output_dir should be None
+        if self.output_format in (OutputFormat.BYTES, OutputFormat.NP_ARRAY):
+            assert self.output_dir is None, (
+                "output_dir must be None if output_format is BYTES or NP_ARRAY as no file is saved"
+            )
 
         output_filename_provided = False
 
-        if output_filename is not None:
-            assert ext is None, "ext must be None if output_filename is provided"
+        # Handle output filename processing
+        if self.output_filename is not None:
+            assert self.ext is None, (
+                "ext must be None if output_filename is provided (extension is taken from filename)"
+            )
             output_filename_provided = True
-            if isinstance(output_filename, str):
-                output_filename = Path(output_filename)
-            assert output_filename.stem != "" and output_filename.suffix != "", "output_filename must be a valid filename"
-            ext = output_filename.suffix
-        elif isinstance(img_input, (str, Path)):
-            output_filename = Path(img_input) if isinstance(img_input, str) else img_input
-            if ext is None:
-                mime = puremagic.from_file(output_filename, mime=True)
+            if isinstance(self.output_filename, str):
+                self.output_filename = Path(self.output_filename)
+            assert (
+                self.output_filename.stem != "" and self.output_filename.suffix != ""
+            ), (
+                "output_filename must be a valid filename with non-empty name and extension"
+            )
+            self.ext = self.output_filename.suffix
+        elif isinstance(self.img_input, (str, Path)):
+            # Default output filename to input filename if none provided
+            self.output_filename = (
+                Path(self.img_input)
+                if isinstance(self.img_input, str)
+                else self.img_input
+            )
+            # Detect MIME type from input file if extension not specified
+            if self.ext is None:
+                self.mime = puremagic.from_file(self.output_filename, mime=True)
 
-        if isinstance(img_input, (bytes, bytearray)):
-            raw = bytes(img_input) if isinstance(img_input, bytearray) else img_input
-            if ext is None:
-                mime = puremagic.from_string(raw, mime=True)
+        # Handle bytes/bytearray input MIME type detection
+        if isinstance(self.img_input, (bytes, bytearray)):
+            raw = (
+                bytes(self.img_input)
+                if isinstance(self.img_input, bytearray)
+                else self.img_input
+            )
+            if self.ext is None:
+                self.mime = puremagic.from_string(raw, mime=True)
 
-        if ext is not None and mime is None:
-            ext = ext.lower()
-            ext = f".{ext}" if not ext.startswith('.') else ext
-            mime, _ = mimetypes.guess_type(f"dummy{ext}")
-            assert mime is not None, f"Invalid ext {ext} in output_filename provided" if output_filename_provided else "Invalid ext {ext} provided"
-        
-        if mime is not None:
-            assert mime.startswith('image/'), f"Invalid mime type {mime} for ext {ext} in output_filename provided" if output_filename_provided else f"Invalid mime type {mime} for ext {ext} provided"
-            if ext is None:
-                ext = mimetypes.guess_extension(mime)
+        # Process extension and MIME type relationships
+        if self.ext is not None and self.mime is None:
+            # Normalize extension format
+            self.ext = self.ext.lower()
+            self.ext = f".{self.ext}" if not self.ext.startswith(".") else self.ext
+            # Infer MIME type from extension
+            self.mime, _ = mimetypes.guess_type(f"dummy{self.ext}")
+            assert self.mime is not None, (
+                f"Invalid extension '{self.ext}' in output_filename provided"
+                if output_filename_provided
+                else f"Invalid extension '{self.ext}' provided"
+            )
 
-        if isinstance(img_input, (str, Path)):
-            image_path_str = str(img_input) if isinstance(img_input, Path) else img_input
-            image = cv2.imread(image_path_str)
-        elif isinstance(img_input, (bytes, bytearray)):
-            arr = np.frombuffer(img_input, np.uint8)
-            image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        elif isinstance(img_input, np.ndarray):
-            image = img_input
+        # Validate MIME type is an image type
+        if self.mime is not None:
+            assert self.mime.startswith("image/"), (
+                f"Invalid MIME type '{self.mime}' for extension '{self.ext}' in output_filename provided"
+                if output_filename_provided
+                else f"Invalid MIME type '{self.mime}' for extension '{self.ext}' provided"
+            )
+            # If MIME type is valid but no extension, get default extension for this MIME type
+            if self.ext is None:
+                self.ext = mimetypes.guess_extension(self.mime)
 
-        # load the image and compute the ratio of the old height
-        # to the new height, clone it, and resize it
-        RESCALED_HEIGHT = 500.0
+    def load(self):
+        """
+        Load image data from the provided input source.
 
-        ratio = image.shape[0] / RESCALED_HEIGHT
-        orig = image.copy()
-        rescaled_image = imutils.resize(image, height = int(RESCALED_HEIGHT))
+        Supports loading from:
+        - File paths (str or Path)
+        - Binary data (bytes or bytearray)
+        - NumPy arrays
 
-        # get the contour of the document
-        screenCnt = self.get_contour(rescaled_image)
+        The loaded image is stored in the `image` attribute as a NumPy array.
+        """
+        if isinstance(self.img_input, (str, Path)):
+            # Convert Path to string if needed for OpenCV
+            image_path_str = (
+                str(self.img_input)
+                if isinstance(self.img_input, Path)
+                else self.img_input
+            )
+            # Load image from file
+            self.image = cv2.imread(image_path_str)
+        elif isinstance(self.img_input, (bytes, bytearray)):
+            # Convert binary data to numpy array
+            arr = np.frombuffer(self.img_input, np.uint8)
+            # Decode image from memory buffer
+            self.image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        elif isinstance(self.img_input, np.ndarray):
+            # Use numpy array directly
+            self.image = (
+                self.img_input.copy()
+            )  # Create a copy to avoid modifying the original
 
-        # apply the perspective transformation
-        warped = transform.four_point_transform(orig, screenCnt * ratio)
+    def get_corner_coordinates(self):
+        """
+        Detect the four corners of the document in the image.
 
-        if scan_mode is ScanMode.COLOR:
-            # split channels
-            b, g, r = cv2.split(warped)
+        Uses edge detection and contour finding algorithms to identify
+        the document boundaries. The result is stored in the `corners`
+        attribute as a NumPy array of shape (4, 2) containing the (x, y)
+        coordinates of the four corners.
+        """
+        self.corners = get_contour(self.image)
+
+    def warp(self):
+        """
+        Apply perspective transformation to get a "top-down" view of the document.
+
+        Uses the detected corners to compute a homography matrix and warp
+        the image to a rectangular shape. This corrects perspective distortion
+        and produces a flat, frontal view of the document.
+        """
+        # Apply the perspective transformation based on detected corners
+        self.image = transform.four_point_transform(self.image, self.corners)
+
+    def change_mode(self):
+        """
+        Convert the image to the specified color mode.
+
+        If the mode is GRAYSCALE, converts the image from BGR to grayscale.
+        If the mode is COLOR, the image remains unchanged.
+        """
+        if self.mode is Mode.GRAYSCALE:
+            # Convert from BGR color space to single-channel grayscale
+            self.image = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
+
+    def enhance(self):
+        """
+        Enhance the image quality using sharpening and thresholding techniques.
+
+        For grayscale images:
+        1. Apply unsharp masking for sharpening
+        2. Apply adaptive thresholding for binarization
+
+        For color images:
+        1. Split into BGR channels
+        2. Apply unsharp masking to each channel independently
+        3. Merge the enhanced channels
+
+        This improves readability and reduces noise in the scanned document.
+        """
+        if len(self.image.shape) == 2:
+            # For grayscale images (single channel)
+
+            # Sharpen image using unsharp masking technique
+            # 1. Create a blurred version of the image
+            sharpen = cv2.GaussianBlur(self.image, (0, 0), 3)
+            # 2. Subtract the blurred image from the original with weights
+            #    (1.5 * original - 0.5 * blurred = original + 0.5 * (original - blurred))
+            sharpen = cv2.addWeighted(self.image, 1.5, sharpen, -0.5, 0)
+
+            # Apply adaptive threshold to get a clean black and white effect
+            # Adapts the threshold based on local neighborhood (21x21 pixels)
+            # 15 is the constant subtracted from the weighted mean
+            self.image = cv2.adaptiveThreshold(
+                sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15
+            )
+        else:
+            # For color images (3 channels)
+
+            # Split the image into its color channels
+            b, g, r = cv2.split(self.image)
             sharpened_channels = []
 
-            # sharpen each channel
+            # Sharpen each channel independently using the same unsharp masking technique
             for ch in (b, g, r):
                 blur = cv2.GaussianBlur(ch, (0, 0), 3)
                 sharpen = cv2.addWeighted(ch, 1.5, blur, -0.5, 0)
                 sharpened_channels.append(sharpen)
 
-            # remerge channels
-            processed = cv2.merge(sharpened_channels)
-        elif scan_mode is ScanMode.GRAYSCALE:
-            # convert the warped image to grayscale
-            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            # Recombine the sharpened channels into a color image
+            self.image = cv2.merge(sharpened_channels)
 
-            # sharpen image
-            sharpen = cv2.GaussianBlur(gray, (0,0), 3)
-            sharpen = cv2.addWeighted(gray, 1.5, sharpen, -0.5, 0)
+    def save_image(self):
+        """
+        Save or prepare the processed image according to the specified output format.
 
-            # apply adaptive threshold to get black and white effect
-            processed = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
-
-        # save the transformed image
-        if output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
-            output_dir = Path(output_dir) if output_dir is not None else Path(img_input).parent / "output"
-            output_filepath = output_dir / output_filename.name
-            output_dir.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(output_filepath), processed)
-            return output_filepath if output_format is OutputFormat.FILE_PATH else str(output_filepath)
-        elif output_format is OutputFormat.BYTES:
-            _, buffer = cv2.imencode(ext, processed)
+        Returns
+        -------
+        Union[str, Path, bytes, np.ndarray]
+            The processed image in the requested format:
+            - For PATH_STR: Path to the saved image as a string
+            - For FILE_PATH: Path to the saved image as a Path object
+            - For BYTES: Image data as bytes
+            - For NP_ARRAY: Image data as a NumPy array
+        """
+        if self.output_format in (OutputFormat.PATH_STR, OutputFormat.FILE_PATH):
+            # Determine output directory, creating default if needed
+            self.output_dir = (
+                Path(self.output_dir)
+                if self.output_dir is not None
+                else Path(self.img_input).parent / "output"
+            )
+            # Create full output path
+            output_filepath = self.output_dir / self.output_filename.name
+            # Create output directory if it doesn't exist
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            # Save image to file using OpenCV
+            cv2.imwrite(str(output_filepath), self.image)
+            # Return according to requested format
+            return (
+                output_filepath
+                if self.output_format is OutputFormat.FILE_PATH
+                else str(output_filepath)
+            )
+        elif self.output_format is OutputFormat.BYTES:
+            # Encode image to bytes using the specified extension
+            _, buffer = cv2.imencode(self.ext, self.image)
             return buffer.tobytes()
-        elif output_format is OutputFormat.NP_ARRAY:
-            return processed
+        elif self.output_format is OutputFormat.NP_ARRAY:
+            # Return the NumPy array directly
+            return self.image
+
+    def scan(
+        self,
+    ) -> Union[str, Path, bytes, np.ndarray]:
+        """
+        Execute the complete document scanning workflow.
+
+        This method orchestrates the full document scanning process to convert
+        a casual document photo into a professional-quality scan:
+        1. Load the image from the input source
+        2. Detect document corners
+        3. Apply perspective transformation for a top-down view
+        4. Convert to the specified color mode
+        5. Enhance document quality and readability
+        6. Save or return the processed document
+
+        Returns
+        -------
+        Union[str, Path, bytes, np.ndarray]
+            The professional-quality scanned document in the requested output format
+        """
+        # Step 1: Load the image from the provided input source
+        self.load()
+
+        # Step 2: Detect the document corners in the image
+        self.get_corner_coordinates()
+
+        # Step 3: Apply perspective transformation to get a "top-down" view
+        self.warp()
+
+        # Step 4: Convert to grayscale if specified
+        self.change_mode()
+
+        # Step 5: Enhance image quality with sharpening and thresholding
+        self.enhance()
+
+        # Step 6: Save or return the processed image in the requested format
+        return self.save_image()

@@ -1,6 +1,6 @@
 [project]
 name = "phototoscan"
-version = "0.1.3"
+version = "0.1.4"
 description = "A Python library that converts casual document snapshots into professional-quality scanned documents."
 authors = [
     { name = "j-about", email = "142051449+j-about@users.noreply.github.com" },
